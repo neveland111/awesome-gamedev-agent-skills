@@ -1,0 +1,115 @@
+# ffmpeg pipeline for a 9:16 captioned short
+
+Everything here is what `scripts/render_short.py` does; use it when you need to change one stage
+by hand or debug a render.
+
+Requirements: ffmpeg 4.4+ with `libass` (`ffmpeg -filters | grep subtitles`). `drawtext` is not
+required and is often missing from static builds.
+
+## 1. Probe the narration
+
+```bash
+ffprobe -v error -show_entries format=duration -of csv=p=0 vo/01.mp3
+```
+
+Timeline for scene *i*: `duration_i = max(audio_i + gap, 3.4)`, last scene
+`max(audio_last + 1.8, 4.2)`; `start_i = Σ duration_<i`.
+
+## 2. One clip per scene
+
+```bash
+ffmpeg -y -loop 1 -framerate 30 -t 5.19 -i stills/01.jpg \
+  -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,\
+zoompan=z='min(zoom+0.00064,1.10)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'\
+:d=1:s=1080x1920:fps=30,format=yuv420p" \
+  -r 30 -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p build/clip01.mp4
+```
+
+- `zoom step = (zoom_max − 1) / (duration × fps)`; `zoom_max` 1.08–1.12 for calm shorts.
+- Alternate the anchor between scenes (centre, then a slow upward pan) so consecutive scenes do
+  not share the same push:
+
+```bash
+# pan variant
+y='ih/2-(ih/zoom/2)-(ih/zoom*0.035)'
+```
+
+- Keep `-framerate` equal to `fps` in `zoompan`. Mismatch is the single most common cause of a
+  short final video and drifting captions.
+
+## 3. Concatenate
+
+```bash
+printf "file '%s'\n" "$PWD"/build/clip*.mp4 > build/list.txt
+ffmpeg -y -f concat -safe 0 -i build/list.txt -c copy build/body.mp4
+```
+
+## 4. Narration mix
+
+```bash
+ffmpeg -y \
+  -i vo/01.mp3 -i vo/02.mp3 -i vo/03.mp3 \
+  -filter_complex "\
+[0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=0|0[a0];\
+[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=5190|5190[a1];\
+[2:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=12480|12480[a2];\
+[a0][a1][a2]amix=inputs=3:normalize=0:duration=longest,apad,atrim=0:18.2,\
+loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
+  -map "[aout]" -c:a aac -b:a 192k build/voice.m4a
+```
+
+`normalize=0` keeps per-line levels; without it every added line gets quieter.
+
+## 5. Captions (libass)
+
+`build/caps.ass`:
+
+```text
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Main,Poppins,80,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,9,2,8,50,50,255,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:05.19,Main,,0,0,0,,{\fad(220,220)\an8}enemies learn.\Nyou don't
+```
+
+- `MarginV: 255` is the top inset for alignment 8 at 1920 tall (~13%). Raise it to push captions
+  down; never let them pass 30% or they meet the subject.
+- Timecodes are `H:MM:SS.cc` (centiseconds).
+- `Fontname` is the family, resolved from `fontsdir`; pass the folder explicitly.
+
+## 6. Final render
+
+```bash
+ffmpeg -y -i build/body.mp4 -i build/voice.m4a \
+  -vf "subtitles=filename=build/caps.ass:fontsdir=assets/fonts" \
+  -map 0:v -map 1:a -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -r 30 \
+  -c:a aac -b:a 192k -shortest -movflags +faststart build/short.mp4
+```
+
+## 7. QA
+
+```bash
+ffprobe -v error -show_entries format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate \
+  -of default=nw=1 build/short.mp4
+
+# one frame per scene, to check caption placement
+ffmpeg -y -ss 2.0 -i build/short.mp4 -frames:v 1 build/frame-01.jpg
+
+# loudness sanity: mean around -19 dB, peak below -1 dB
+ffmpeg -hide_banner -i build/short.mp4 -af volumedetect -f null -
+
+# confirm each line actually starts where planned
+ffmpeg -hide_banner -i build/short.mp4 -af "silencedetect=noise=-32dB:d=1.2" -f null -
+```
+
+A correctly built short has silence only in the gaps between scenes; a long silence in the middle
+means a scene has no narration file.

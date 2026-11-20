@@ -1,0 +1,32 @@
+{
+  "width": 1080,
+  "height": 1920,
+  "fps": 30,
+  "font_family": "Poppins",
+  "font_size": 80,
+  "caption_y": 0.14,
+  "zoom": 1.1,
+  "gap": 0.65,
+  "scenes": [
+    {
+      "image": "stills/01.jpg",
+      "caption": "enemies learn.\nyou don't",
+      "audio": "vo/01.mp3"
+    },
+    {
+      "image": "stills/02.jpg",
+      "caption": "every run they adapt\nto how you play",
+      "audio": "vo/02.mp3"
+    },
+    {
+      "image": "stills/03.jpg",
+      "caption": "same level.\nnew fight",
+      "audio": "vo/03.mp3"
+    },
+    {
+      "image": "stills/04.jpg",
+      "caption": "demo friday",
+      "audio": "vo/04.mp3"
+    }
+  ]
+}

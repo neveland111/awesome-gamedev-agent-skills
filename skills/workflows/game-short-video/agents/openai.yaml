@@ -1,0 +1,4 @@
+interface:
+  display_name: "Game Short Video"
+  short_description: "Render a captioned 9:16 game short with ffmpeg"
+  default_prompt: "Use $game-short-video to turn these stills and lines into a 9:16 short."

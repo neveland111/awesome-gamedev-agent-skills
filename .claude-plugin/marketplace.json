@@ -88,7 +88,8 @@
         "./skills/workflows/game-jam",
         "./skills/workflows/prototype-fast",
         "./skills/workflows/steam-publish",
-        "./skills/workflows/itch-publish"
+        "./skills/workflows/itch-publish",
+        "./skills/workflows/game-short-video"
       ]
     },
     {
@@ -241,12 +242,13 @@
       "name": "workflows",
       "source": "./",
       "strict": false,
-      "description": "Process and shipping skills: game jam, fast prototyping, Steam, itch.io.",
+      "description": "Process and shipping skills: game jam, fast prototyping, Steam, itch.io, promo shorts.",
       "skills": [
         "./skills/workflows/game-jam",
         "./skills/workflows/prototype-fast",
         "./skills/workflows/steam-publish",
-        "./skills/workflows/itch-publish"
+        "./skills/workflows/itch-publish",
+        "./skills/workflows/game-short-video"
       ]
     }
   ]
