@@ -62,6 +62,16 @@ loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
 
 ### 4b. Music bed (optional)
 
+Measure the bed once, then apply the gain that puts it at −30 LUFS plus `music_volume`:
+
+```bash
+ffmpeg -hide_banner -nostats -i audio/bed.mp3 \
+  -af "loudnorm=print_format=json" -f null - 2>&1 | grep input_i
+# GAIN = -30 - input_i + music_volume      (music_volume defaults to 0)
+# Only input_i is used: the encoded output is thrown away, so loudnorm's own I/TP/LRA
+# targets would not change the measurement.
+```
+
 Loop the bed over the whole video, level it, fade the tail, duck it under the voice, then sum:
 
 ```bash
@@ -73,7 +83,7 @@ ffmpeg -y -i vo/01.mp3 -i vo/02.mp3 -i vo/03.mp3 -stream_loop -1 -i audio/bed.mp
 [a0][a1][a2]amix=inputs=3:normalize=0:duration=longest[voice];\
 [voice]asplit=2[vmix][vkey0];\
 [vkey0]apad=whole_dur=18.2[vkey];\
-[3:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=-22dB,\
+[3:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=8.6dB,\
 atrim=0:18.2,asetpts=PTS-STARTPTS,afade=t=out:st=16.7:d=1.5[music];\
 [music][vkey]sidechaincompress=threshold=0.05:ratio=8:attack=10:release=400:makeup=1[bed];\
 [vmix][bed]amix=inputs=2:normalize=0:duration=longest,apad,atrim=0:18.2,\
@@ -84,9 +94,10 @@ loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
 - `-stream_loop -1` must sit immediately before the music `-i`, and `atrim` ends the loop.
 - `sidechaincompress` takes `[main][sidechain]`: the bed is compressed by the voice, so the music
   drops a few dB whenever someone speaks and comes back in the gaps.
-- `volume=-22dB` is the pre-duck gain (`music_volume`), not a target level: a bed mastered near
-  −14 LUFS lands around −36 dB mean under a −16 LUFS voice at that setting, so raise it to −12…−16
-  if the music disappears. `makeup=1` stops the compressor from also brightening the bed.
+- `volume=8.6dB` above is `-30 − (−38.6) + 0` for a bed that measures −38.6 LUFS: the same bed
+  mastered at −14 LUFS would get `-16dB` instead and end up at the same place. That is the point of
+  the measurement pass — `music_volume` is an offset from −30 LUFS, not a raw gain on the file.
+  `makeup=1` stops the compressor from also brightening the bed.
 - `duration=longest` keeps the bed playing through the outro tail; `atrim` then ends the mix at the
   video length, and the 1.5 s `afade` lands inside the last scene. The side-chain key must be
   padded to the same length first — `sidechaincompress` ends at the shorter input, so an unpadded

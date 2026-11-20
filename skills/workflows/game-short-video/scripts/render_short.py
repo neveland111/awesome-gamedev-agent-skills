@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,10 @@ LAST_PAD = 1.8
 MIN_LAST = 4.2
 OUTLINE = 9
 MUSIC_FADE = 1.5
-DEFAULT_MUSIC_DB = -22.0
+# The bed is normalised to this integrated loudness first, so a quiet and a hot
+# track land at the same place; 'music_volume' is then an offset on top of it.
+MUSIC_TARGET_LUFS = -30.0
+DEFAULT_MUSIC_DB = 0.0
 
 
 class ProjectError(Exception):
@@ -57,6 +61,27 @@ def probe_duration(ffprobe: str, path: str) -> float:
     if value <= 0:
         raise ProjectError(f"{path} has no playable duration")
     return value
+
+
+def measure_lufs(ffmpeg: str, path: str) -> "float | None":
+    """Integrated loudness of an audio file in LUFS, or None when unmeasurable."""
+    # Only 'input_i' is read and the output frame is discarded, so loudnorm's own
+    # I/TP/LRA targets would change nothing here; silence measures '-inf' -> None.
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-nostats", "-i", path,
+         "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    match = re.search(r'"input_i"\s*:\s*"(-?[0-9]+(?:\.[0-9]+)?)"', proc.stderr)
+    return float(match.group(1)) if match else None
+
+
+def bed_gain_db(measured_lufs: "float | None", offset_db: float) -> float:
+    """Gain that puts the bed at MUSIC_TARGET_LUFS, then applies the offset."""
+    if measured_lufs is None:
+        return offset_db
+    return MUSIC_TARGET_LUFS - measured_lufs + offset_db
 
 
 def ass_time(seconds: float) -> str:
@@ -116,6 +141,8 @@ def load_project(path: str) -> dict:
         value = data["music_volume"]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ProjectError("'music_volume' must be a number of dB")
+        if not -60.0 <= value <= 0.0:
+            raise ProjectError("'music_volume' must be between -60 and 0 dB")
     for key in ("width", "height", "fps"):
         if key in data and not isinstance(data[key], int):
             raise ProjectError(f"'{key}' must be an integer")
@@ -170,8 +197,6 @@ def main(argv: list[str] | None = None) -> int:
     caption_y = min(max(float(project.get("caption_y", 0.14)), 0.02), 0.6)
     music = project.get("music")
     music_db = float(project.get("music_volume", DEFAULT_MUSIC_DB))
-    if not -60.0 <= music_db <= 0.0:
-        die("'music_volume' must be between -60 and 0 dB", 2)
     scenes = project["scenes"]
 
     out = os.path.abspath(args.out or os.path.splitext(os.path.abspath(args.project))[0]
@@ -216,6 +241,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {row['scene']:2d}  {row['start']:6.2f}s +{row['duration']:5.2f}s  "
                       f"audio {row['audio']:5.2f}s  {row['caption']}")
         return 0
+
+    # Normalise the bed to a fixed loudness before the offset, so the same
+    # music_volume behaves the same for a quiet and for a hot track.
+    bed_gain = music_db
+    if music:
+        measured = measure_lufs(ffmpeg, music)
+        if measured is None:
+            print("warning: cannot measure the music bed; music_volume is used as a raw gain",
+                  file=sys.stderr)
+        bed_gain = bed_gain_db(measured, music_db)
 
     workdir = args.workdir or tempfile.mkdtemp(prefix="game-short-")
     os.makedirs(workdir, exist_ok=True)
@@ -308,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
                 f";[vkey0]apad=whole_dur={total}[vkey]"
                 f";[{len(plan)}:a]aresample=44100,"
                 "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"volume={music_db}dB,atrim=0:{total},asetpts=PTS-STARTPTS,"
+                f"volume={bed_gain:.3f}dB,atrim=0:{total},asetpts=PTS-STARTPTS,"
                 f"afade=t=out:st={max(total - MUSIC_FADE, 0.0):.3f}:d={MUSIC_FADE}[music]"
                 ";[music][vkey]sidechaincompress=threshold=0.05:ratio=8:"
                 "attack=10:release=400:makeup=1[bed]"
@@ -344,8 +379,10 @@ def main(argv: list[str] | None = None) -> int:
     size = os.path.getsize(out)
     summary = {"output": out, "bytes": size, "total": total, "width": width,
                "height": height, "fps": fps, "music": music,
-               "music_volume": music_db if music else None, "timeline": timeline,
-               "rendered": True}
+               "music_volume": music_db if music else None,
+               "music_gain_db": round(bed_gain, 2) if music else None,
+               "music_target_lufs": MUSIC_TARGET_LUFS if music else None,
+               "timeline": timeline, "rendered": True}
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:

@@ -70,7 +70,7 @@ the art itself, use `create-game-assets`.
   "zoom": 1.1,
   "gap": 0.65,
   "music": "audio/bed.mp3",
-  "music_volume": -22,
+  "music_volume": 0,
   "scenes": [
     {
       "image": "stills/01-hook.jpg",
@@ -90,9 +90,11 @@ the art itself, use `create-game-assets`.
 wrap on explicit `\n` only — keep it to two lines of at most ~26 characters. `caption_y` is the
 top edge as a fraction of height. `gap` is the pause after a line; the last scene adds extra.
 `music` is optional: one audio file, looped to the full length, faded out over the last 1.5 s and
-ducked automatically under the voice. `music_volume` is the gain applied to that file in dB before
-ducking (default `-22`, allowed `-60` to `0`) — it is not a target level, so start from a bed
-normalised around −14 LUFS and adjust by ear; omit both keys for a voice-only short.
+ducked automatically under the voice. The bed is first measured and normalised to **−30 LUFS**, so
+a quiet and a loud master land in the same place; `music_volume` is then an offset in dB on top of
+that (default `0`, allowed `-60` to `0`). At `0` the bed sits about 14 dB under a −16 LUFS voice,
+which is the right starting point — lower it in 2–3 dB steps if the words get buried. Omit both
+keys for a voice-only short.
 
 `assets/project.example.json` is a working starting point.
 
@@ -143,11 +145,13 @@ normalize once:
 [a0][a1]...amix=inputs=N:normalize=0:duration=longest[voice]
 ```
 
-With a `music` file, the bed is looped (`-stream_loop -1`), levelled, faded and side-chain
-compressed by the voice before the two are summed:
+With a `music` file, the bed's integrated loudness is measured once (`loudnorm … print_format=json`,
+read `input_i`) and `GAIN = -30 - measured + music_volume`; the bed is then looped
+(`-stream_loop -1`), levelled by that gain, faded and side-chain compressed by the voice before the
+two are summed:
 
 ```text
-[N:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=-22dB,\
+[N:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=GAINdB,\
 atrim=0:TOTAL,asetpts=PTS-STARTPTS,afade=t=out:st=TOTAL-1.5:d=1.5[music];
 [voice]asplit=2[vmix][vkey0];
 [vkey0]apad=whole_dur=TOTAL[vkey];
@@ -175,8 +179,8 @@ end-of-stream and the render hangs.
 - **Video ends before the last word** → the final scene needs the longer tail; the script already
   applies it, so check the source audio really is the closing line.
 - **Peaks at 0 dB or dialogue buried** → run `loudnorm` once at the end, not per line; a bed
-  above about −18 dB fights the voice. Lower `music_volume` (default −22) unless the mix was
-  measured and the words still sit clearly on top.
+  above about −18 dB under the voice fights it. The bed is normalised to −30 LUFS, so this is now
+  a per-video judgement of `music_volume` (default `0`), not a property of the track you picked.
 - **Music stops early or ends abruptly** → the bed is looped and trimmed to the video length by
   the script; a gap means the file is shorter than expected and has a silent tail — trim the
   source loop to its real content.
