@@ -3,7 +3,8 @@
 
 Reads a project JSON (see the skill's assets/project.example.json), builds one
 Ken Burns clip per scene, concatenates them, mixes the narration lines at their
-scene starts, burns captions in with libass, and writes a single MP4.
+scene starts, optionally adds a looped music bed ducked under the narration,
+burns captions in with libass, and writes a single MP4.
 
 Offline and deterministic: it never downloads anything and writes only to
 --out plus a temporary work folder that is removed unless --keep-temp is given.
@@ -25,6 +26,8 @@ MIN_SCENE = 3.4
 LAST_PAD = 1.8
 MIN_LAST = 4.2
 OUTLINE = 9
+MUSIC_FADE = 1.5
+DEFAULT_MUSIC_DB = -22.0
 
 
 class ProjectError(Exception):
@@ -101,6 +104,18 @@ def load_project(path: str) -> dict:
         if not isinstance(caption, str):
             raise ProjectError(f"scene {index}: 'caption' must be a string")
         scene["caption"] = caption
+    music = data.get("music")
+    if music is not None:
+        if not isinstance(music, str) or not music:
+            raise ProjectError("'music' must be a path to an audio file")
+        resolved = music if os.path.isabs(music) else os.path.join(base, music)
+        if not os.path.isfile(resolved):
+            raise ProjectError(f"'music' not found: {resolved}")
+        data["music"] = resolved
+    if "music_volume" in data:
+        value = data["music_volume"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ProjectError("'music_volume' must be a number of dB")
     for key in ("width", "height", "fps"):
         if key in data and not isinstance(data[key], int):
             raise ProjectError(f"'{key}' must be an integer")
@@ -153,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
     font_family = args.font_family or project.get("font_family") or "Poppins"
     font_size = int(project.get("font_size", 80))
     caption_y = min(max(float(project.get("caption_y", 0.14)), 0.02), 0.6)
+    music = project.get("music")
+    music_db = float(project.get("music_volume", DEFAULT_MUSIC_DB))
+    if not -60.0 <= music_db <= 0.0:
+        die("'music_volume' must be between -60 and 0 dB", 2)
     scenes = project["scenes"]
 
     out = os.path.abspath(args.out or os.path.splitext(os.path.abspath(args.project))[0]
@@ -187,7 +206,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         summary = {"output": out, "total": total, "width": width, "height": height,
-                   "fps": fps, "timeline": timeline, "rendered": False}
+                   "fps": fps, "music": music, "music_volume": music_db if music else None,
+                   "timeline": timeline, "rendered": False}
         if args.json:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
         else:
@@ -277,12 +297,30 @@ def main(argv: list[str] | None = None) -> int:
             )
             labels.append(f"[a{index}]")
         graph = ";".join(filters) + ";" + "".join(labels) + (
-            f"amix=inputs={len(plan)}:normalize=0:duration=longest,"
-            f"apad,atrim=0:{total},loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+            f"amix=inputs={len(plan)}:normalize=0:duration=longest[voice]"
         )
+        tail = f"atrim=0:{total},loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+        if music:
+            # Loop the bed to the full length, fade it out, then duck it under the voice. The
+            # side-chain key is padded with whole_dur (not apad) so the graph still ends.
+            graph += ";" + (
+                "[voice]asplit=2[vmix][vkey0]"
+                f";[vkey0]apad=whole_dur={total}[vkey]"
+                f";[{len(plan)}:a]aresample=44100,"
+                "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"volume={music_db}dB,atrim=0:{total},asetpts=PTS-STARTPTS,"
+                f"afade=t=out:st={max(total - MUSIC_FADE, 0.0):.3f}:d={MUSIC_FADE}[music]"
+                ";[music][vkey]sidechaincompress=threshold=0.05:ratio=8:"
+                "attack=10:release=400:makeup=1[bed]"
+                ";[vmix][bed]amix=inputs=2:normalize=0:duration=longest,"
+                + tail
+            )
+            inputs += ["-stream_loop", "-1", "-i", music]
+        else:
+            graph += f";[voice]apad,{tail}"
         voice = os.path.join(workdir, "voice.m4a")
         run([ffmpeg, "-y", *inputs, "-filter_complex", graph, "-map", "[aout]",
-             "-c:a", "aac", "-b:a", "192k", voice])
+             "-t", f"{total}", "-c:a", "aac", "-b:a", "192k", voice])
 
         subtitles = f"subtitles=filename={caps}"
         if args.fonts_dir:
@@ -305,7 +343,9 @@ def main(argv: list[str] | None = None) -> int:
         die("ffmpeg did not produce an output file", 1)
     size = os.path.getsize(out)
     summary = {"output": out, "bytes": size, "total": total, "width": width,
-               "height": height, "fps": fps, "timeline": timeline, "rendered": True}
+               "height": height, "fps": fps, "music": music,
+               "music_volume": music_db if music else None, "timeline": timeline,
+               "rendered": True}
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:

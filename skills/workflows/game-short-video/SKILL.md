@@ -69,6 +69,8 @@ the art itself, use `create-game-assets`.
   "caption_y": 0.14,
   "zoom": 1.1,
   "gap": 0.65,
+  "music": "audio/bed.mp3",
+  "music_volume": -22,
   "scenes": [
     {
       "image": "stills/01-hook.jpg",
@@ -87,6 +89,10 @@ the art itself, use `create-game-assets`.
 `image` and `audio` are required per scene; `caption` may be empty for a silent beat. Captions
 wrap on explicit `\n` only — keep it to two lines of at most ~26 characters. `caption_y` is the
 top edge as a fraction of height. `gap` is the pause after a line; the last scene adds extra.
+`music` is optional: one audio file, looped to the full length, faded out over the last 1.5 s and
+ducked automatically under the voice. `music_volume` is the gain applied to that file in dB before
+ducking (default `-22`, allowed `-60` to `0`) — it is not a target level, so start from a bed
+normalised around −14 LUFS and adjust by ear; omit both keys for a voice-only short.
 
 `assets/project.example.json` is a working starting point.
 
@@ -134,9 +140,25 @@ normalize once:
 
 ```text
 [0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=5186|5186[a0];...
-[a0][a1]...amix=inputs=N:normalize=0:duration=longest,apad,atrim=0:TOTAL,\
-loudnorm=I=-16:TP=-1.5:LRA=11[aout]
+[a0][a1]...amix=inputs=N:normalize=0:duration=longest[voice]
 ```
+
+With a `music` file, the bed is looped (`-stream_loop -1`), levelled, faded and side-chain
+compressed by the voice before the two are summed:
+
+```text
+[N:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=-22dB,\
+atrim=0:TOTAL,asetpts=PTS-STARTPTS,afade=t=out:st=TOTAL-1.5:d=1.5[music];
+[voice]asplit=2[vmix][vkey0];
+[vkey0]apad=whole_dur=TOTAL[vkey];
+[music][vkey]sidechaincompress=threshold=0.05:ratio=8:attack=10:release=400:makeup=1[bed];
+[vmix][bed]amix=inputs=2:normalize=0:duration=longest,atrim=0:TOTAL[vout]
+```
+
+The key is padded to the full length first: `sidechaincompress` stops at the shorter of its two
+inputs, so an unpadded voice cuts the bed off at the last word instead of playing the outro out.
+Use `apad=whole_dur`, not `apad,atrim` — an unbounded `apad` upstream of `atrim` never signals
+end-of-stream and the render hangs.
 
 ## Pitfalls
 
@@ -152,8 +174,12 @@ loudnorm=I=-16:TP=-1.5:LRA=11[aout]
   into one file. Keep exactly one spoken sentence group per scene.
 - **Video ends before the last word** → the final scene needs the longer tail; the script already
   applies it, so check the source audio really is the closing line.
-- **Peaks at 0 dB or dialogue buried** → run `loudnorm` once at the end, not per line, and keep
-  music below −20 dB relative to voice (the script mixes voice only).
+- **Peaks at 0 dB or dialogue buried** → run `loudnorm` once at the end, not per line; a bed
+  above about −18 dB fights the voice. Lower `music_volume` (default −22) unless the mix was
+  measured and the words still sit clearly on top.
+- **Music stops early or ends abruptly** → the bed is looped and trimmed to the video length by
+  the script; a gap means the file is shorter than expected and has a silent tail — trim the
+  source loop to its real content.
 - **Text too long to read in 4 seconds** → two lines maximum; move the detail into narration.
 - **Captions unreadable on a bright sky** → outline 9 plus shadow, not a semi-transparent box;
   boxes hide the art and look like subtitles rather than design.

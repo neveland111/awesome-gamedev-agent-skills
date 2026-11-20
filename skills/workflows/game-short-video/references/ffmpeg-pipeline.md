@@ -60,6 +60,40 @@ loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
 
 `normalize=0` keeps per-line levels; without it every added line gets quieter.
 
+### 4b. Music bed (optional)
+
+Loop the bed over the whole video, level it, fade the tail, duck it under the voice, then sum:
+
+```bash
+ffmpeg -y -i vo/01.mp3 -i vo/02.mp3 -i vo/03.mp3 -stream_loop -1 -i audio/bed.mp3 \
+  -filter_complex "\
+[0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=0|0[a0];\
+[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=5190|5190[a1];\
+[2:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=12480|12480[a2];\
+[a0][a1][a2]amix=inputs=3:normalize=0:duration=longest[voice];\
+[voice]asplit=2[vmix][vkey0];\
+[vkey0]apad=whole_dur=18.2[vkey];\
+[3:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=-22dB,\
+atrim=0:18.2,asetpts=PTS-STARTPTS,afade=t=out:st=16.7:d=1.5[music];\
+[music][vkey]sidechaincompress=threshold=0.05:ratio=8:attack=10:release=400:makeup=1[bed];\
+[vmix][bed]amix=inputs=2:normalize=0:duration=longest,apad,atrim=0:18.2,\
+loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
+  -map "[aout]" -c:a aac -b:a 192k build/mix.m4a
+```
+
+- `-stream_loop -1` must sit immediately before the music `-i`, and `atrim` ends the loop.
+- `sidechaincompress` takes `[main][sidechain]`: the bed is compressed by the voice, so the music
+  drops a few dB whenever someone speaks and comes back in the gaps.
+- `volume=-22dB` is the pre-duck gain (`music_volume`), not a target level: a bed mastered near
+  −14 LUFS lands around −36 dB mean under a −16 LUFS voice at that setting, so raise it to −12…−16
+  if the music disappears. `makeup=1` stops the compressor from also brightening the bed.
+- `duration=longest` keeps the bed playing through the outro tail; `atrim` then ends the mix at the
+  video length, and the 1.5 s `afade` lands inside the last scene. The side-chain key must be
+  padded to the same length first — `sidechaincompress` ends at the shorter input, so an unpadded
+  voice silently truncates the bed at the last word.
+- Check the result with `volumedetect` at −19 dB mean and confirm the words are still clear before
+  publishing; a bed that measures fine can still mask sibilants.
+
 ## 5. Captions (libass)
 
 `build/caps.ass`:
