@@ -65,12 +65,26 @@ loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
 Measure the bed once, then apply the gain that puts it at −30 LUFS plus `music_volume`:
 
 ```bash
-ffmpeg -hide_banner -nostats -i audio/bed.mp3 \
-  -af "loudnorm=print_format=json" -f null - 2>&1 | grep input_i
-# GAIN = -30 - input_i + music_volume      (music_volume defaults to 0)
-# Only input_i is used: the encoded output is thrown away, so loudnorm's own I/TP/LRA
-# targets would not change the measurement.
+ffmpeg -hide_banner -nostats -i audio/bed.mp3 -t 18.2 \
+  -af "loudnorm=print_format=json" -f null - 2>&1 | grep -E 'input_(i|tp)'
+# GAIN = min(-30 - input_i + music_volume, -2 - input_tp)      (music_volume defaults to 0)
+# Only those two numbers are used: the encoded output is thrown away, so loudnorm's own
+# I/TP/LRA targets would not change the measurement.
 ```
+
+`-t` is the length of the finished video. The bed loops from its own start, so nothing past the
+first `TOTAL` seconds ever reaches the mix and decoding the rest is pure waiting. It also changes
+the *answer* for a track whose level moves: an intro at −45 LUFS with a loud drop at 1:30 is now
+judged on the intro — the part the short actually plays — instead of being dragged down to the
+drop's level and leaving the opening inaudible. Re-run the measurement when the cut changes
+length, because a longer short hears more of the track and gets a different gain.
+
+The true-peak term is the safety rail. Loudness normalisation only knows about averages, so a
+quiet ambient bed with one percussive hit can measure −45 LUFS at −5 dBTP: the loudness gain
+(+15 dB) would push that hit to +10 dBTP and clip the encoder. Capping the gain at
+`-2 - input_tp` keeps the bed under −2 dBTP and, in that case, silently costs it some loudness
+instead of clipping — check `music_gain_db` in the render summary when a bed lands quieter than
+expected.
 
 Loop the bed over the whole video, level it, fade the tail, duck it under the voice, then sum:
 
@@ -97,7 +111,9 @@ loudnorm=I=-16:TP=-1.5:LRA=11[aout]" \
 - `volume=8.6dB` above is `-30 − (−38.6) + 0` for a bed that measures −38.6 LUFS: the same bed
   mastered at −14 LUFS would get `-16dB` instead and end up at the same place. That is the point of
   the measurement pass — `music_volume` is an offset from −30 LUFS, not a raw gain on the file.
-  `makeup=1` stops the compressor from also brightening the bed.
+  The gain is capped at `-2 - input_tp` first, so a transient-heavy quiet track is levelled by its
+  peak rather than its average and cannot clip. `makeup=1` stops the compressor from also
+  brightening the bed.
 - `duration=longest` keeps the bed playing through the outro tail; `atrim` then ends the mix at the
   video length, and the 1.5 s `afade` lands inside the last scene. The side-chain key must be
   padded to the same length first — `sidechaincompress` ends at the shorter input, so an unpadded
@@ -142,6 +158,9 @@ ffmpeg -y -i build/body.mp4 -i build/voice.m4a \
 
 ## 7. QA
 
+`scripts/render_short.py project.json --verify build/short.mp4` runs all of this in one pass and
+exits `3` on a violation; these are the same checks by hand.
+
 ```bash
 ffprobe -v error -show_entries format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate \
   -of default=nw=1 build/short.mp4
@@ -149,12 +168,14 @@ ffprobe -v error -show_entries format=duration,size:stream=codec_type,codec_name
 # one frame per scene, to check caption placement
 ffmpeg -y -ss 2.0 -i build/short.mp4 -frames:v 1 build/frame-01.jpg
 
-# loudness sanity: mean around -19 dB, peak below -1 dB
-ffmpeg -hide_banner -i build/short.mp4 -af volumedetect -f null -
+# loudness and true peak: -16 +/-1.5 LUFS, true peak at or below -1 dBTP
+ffmpeg -hide_banner -nostats -i build/short.mp4 -af loudnorm=print_format=json -f null - 2>&1 \
+  | grep -E '"input_(i|tp)"'
 
-# confirm each line actually starts where planned
-ffmpeg -hide_banner -i build/short.mp4 -af "silencedetect=noise=-32dB:d=1.2" -f null -
+# silences, then compare each against the pause the timeline plans for it
+ffmpeg -hide_banner -nostats -i build/short.mp4 -af "silencedetect=noise=-45dB:d=1.0" -f null -
 ```
 
-A correctly built short has silence only in the gaps between scenes; a long silence in the middle
-means a scene has no narration file.
+A correctly built short has silence only in the gaps between scenes and in the outro pad; a
+gap that runs 0.8 s past what the timeline allows means a scene has no narration file. With a
+music bed there is nothing at -45 dB to detect, so run this on a voice-only render as well.

@@ -50,10 +50,12 @@ the art itself, use `create-game-assets`.
    ```
 
    Paths inside the project file are resolved relative to the project file. Run with `--dry-run`
-   first to print the timeline without encoding, and `--json` for machine-readable output.
-5. **QA the actual file, not the intent.** Probe duration/resolution/streams, extract one frame
-   per scene and look at caption placement, and check the audio peak. Commands are in
-   `references/ffmpeg-pipeline.md`.
+   first to print the timeline without encoding, and `--json` for machine-readable output. Add
+   `--strict` to refuse the render when preflight finds a problem (see below).
+5. **QA the actual file, not the intent.** `--verify` does the mechanical pass — duration against
+   the timeline, one frame per scene for caption placement, final loudness and true peak, and
+   silences longer than the timeline allows. Then read a few of those frames yourself: it checks
+   where the text landed, not whether it reads well.
 6. **Hand off where it publishes.** The same file works on Shorts, TikTok and Reels; if the game
    is on Steam or itch.io, link it from the description rather than burning a URL into the frame.
 
@@ -92,7 +94,10 @@ top edge as a fraction of height. `gap` is the pause after a line; the last scen
 `music` is optional: one audio file, looped to the full length, faded out over the last 1.5 s and
 ducked automatically under the voice. The bed is first measured and normalised to **−30 LUFS**, so
 a quiet and a loud master land in the same place; `music_volume` is then an offset in dB on top of
-that (default `0`, allowed `-60` to `0`). At `0` the bed sits about 14 dB under a −16 LUFS voice,
+that (default `0`, allowed `-60` to `0`). The gain is capped so the bed's true peak stays at or
+below −2 dBTP, which can leave a very peaky track a little quieter than −30 LUFS. Only the first
+`TOTAL` seconds of the bed are measured, so a track that changes level midway gets a gain that
+suits its opening; if you re-cut the short longer, the gain moves with it. At `0` the bed sits about 14 dB under a −16 LUFS voice,
 which is the right starting point — lower it in 2–3 dB steps if the words get buried. Omit both
 keys for a voice-only short.
 
@@ -145,8 +150,12 @@ normalize once:
 [a0][a1]...amix=inputs=N:normalize=0:duration=longest[voice]
 ```
 
-With a `music` file, the bed's integrated loudness is measured once (`loudnorm … print_format=json`,
-read `input_i`) and `GAIN = -30 - measured + music_volume`; the bed is then looped
+With a `music` file, the bed's integrated loudness and true peak are measured once over its first
+`TOTAL` seconds — the loop never reaches past the end of the short, and measuring only that span
+keeps the level tied to what is heard (`loudnorm … print_format=json`, read `input_i` and
+`input_tp`) — and
+`GAIN = min(-30 - measured + music_volume, -2 - input_tp)` — the second term keeps a quiet track
+with one loud transient from clipping; the bed is then looped
 (`-stream_loop -1`), levelled by that gain, faded and side-chain compressed by the voice before the
 two are summed:
 
@@ -164,6 +173,60 @@ inputs, so an unpadded voice cuts the bed off at the last word instead of playin
 Use `apad=whole_dur`, not `apad,atrim` — an unbounded `apad` upstream of `atrim` never signals
 end-of-stream and the render hangs.
 
+## Preflight
+
+Every render checks the inputs before the first encode and prints what it finds to stderr:
+
+```text
+preflight: scene 3: still is 752x1392, below 1080x1920 and not 9:16; it will be upscaled and cropped
+preflight: scene 5: longest caption line is 34 characters (max 26)
+preflight: font family 'Inter' is not in assets/fonts; captions will fall back to a system font
+preflight: total 87.1s is over the 60s short limit
+```
+
+Per scene it compares the still's pixel size against the project's `width`x`height` (default
+1080x1920) and its aspect ratio against 9:16 (2 % tolerance), then the caption's line count
+(max 2) and longest line (max 26 characters). Once for the whole short: the total length against
+60 s, and `font_family` against the families actually declared inside the files in `--fonts-dir`
+— read from each font's name table, so a renamed file still matches, and only checked when
+`--fonts-dir` is passed. A `--fonts-dir` that does not exist is always a hard error, before any
+encoding.
+
+These are warnings by default: a slightly soft still still renders, and the choice stays yours.
+Pass `--strict` to turn them into exit `2` before anything is encoded — use it in CI and batch
+runs. `--dry-run` runs the same preflight, so checking costs nothing while you iterate.
+
+## Verify a render
+
+`--verify` checks a finished MP4 against the project instead of encoding anything:
+
+```bash
+python scripts/render_short.py project.json --verify build/short.mp4 \
+    --ffmpeg /path/to/ffmpeg
+```
+
+Exit `0` when everything passes, `3` when a check fails, `2` when the project or the file cannot
+be read. `--json` prints the same report as an object for CI. Four checks:
+
+- **duration** — the container's real duration against the timeline, within 0.25 s or 0.2 %.
+  Catches a render that ended early, a stale file from an older cut, or a project edited after
+  rendering.
+- **captions** — one frame per captioned scene at its midpoint, searched in a band from
+  `caption_y - 0.05` to `caption_y + 0.22`. A caption counts as drawn when near-white pixels sit
+  against a dark outline, which is what white text with a black stroke looks like at 270 px wide.
+  It fails when nothing is found where the caption should be (missing font, caption pulled
+  off-frame, a project that no longer matches the file), when the text touches the outer 2 % and
+  is clipped, or when it reaches the bottom 12 % where the Shorts UI sits.
+- **loudness and true peak** — the final mix must measure −16 ±1.5 LUFS with a true peak at or
+  below −1 dBTP, i.e. the single `loudnorm` pass really ran.
+- **silence** — stretches at −45 dB or quieter lasting at least 1 s that outlast what the timeline
+  already explains (the pause after each line plus the outro pad) by 0.8 s or more. This is what
+  catches a narration file that failed to load or is silent. A music bed fills those gaps, so
+  verify a voice-only render when the mix has music.
+
+The caption check is a pixel heuristic, not OCR: it proves text was drawn near the right place,
+not that it reads correctly.
+
 ## Pitfalls
 
 - **`No such filter: 'drawtext'`** → that ffmpeg has no freetype. Use the libass path above;
@@ -173,7 +236,8 @@ end-of-stream and the render hangs.
 - **Captions cover the character or the gameplay** → they are drawn in the top band; re-crop the
   still or lower `caption_y` only if the top of the frame is busier than the subject.
 - **Font silently ignored, captions fall back to a serif** → ASS matches the font *family*, not
-  the filename. Pass `--fonts-dir` and set `font_family` to the family inside the file.
+  the filename. Pass `--fonts-dir` and set `font_family` to the family inside the file; preflight
+  warns when that family is not among the fonts you shipped.
 - **Lines arrive late or early** → a scene's `audio` is the wrong line, or two lines were merged
   into one file. Keep exactly one spoken sentence group per scene.
 - **Video ends before the last word** → the final scene needs the longer tail; the script already
